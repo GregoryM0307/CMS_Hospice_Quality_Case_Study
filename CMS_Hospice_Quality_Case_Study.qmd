@@ -1,0 +1,441 @@
+---
+title: "Hospice Patient Experience and Quality of Care"
+subtitle: "An End-to-End Healthcare Data Analytics Case Study"
+author: "Healthcare Data Analytics Portfolio"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    number-sections: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+# Executive Summary
+
+This project explores publicly reported hospice quality-of-care measures from the Centers for Medicare & Medicaid Services (CMS). It demonstrates a reproducible workflow for understanding the business problem, preparing data, assessing quality, analyzing performance, visualizing findings, and proposing next steps.
+
+**Important:** this report uses the 500-row `cms_patient_experience` sample included in the R package `tidyr`. It is a lightly cleaned sample derived from CMS Hospice - Provider Data, not the complete current CMS file. Results from this sample should not be presented as current national hospice rankings. The sample's five fields are provider identifier, provider name, measure code, measure title, and performance rate.
+
+# 1. Ask: Business Task
+
+## Business problem
+
+Hospice organizations, quality-improvement teams, researchers, and families need understandable information about reported quality-of-care performance. A healthcare analyst can organize public measures, identify variation and data-quality limitations, and highlight questions that merit further review.
+
+## Project objective
+
+Explore hospice provider quality measure rates, compare results only within comparable measures, assess data quality, and develop evidence-based recommendations for further investigation.
+
+## Stakeholders
+
+- Hospice quality and operations leaders
+- Healthcare data analysts and reporting teams
+- Researchers and healthcare policy professionals
+- Patients and families seeking to understand publicly reported quality information
+
+## Research questions
+
+1. Which measures have the highest and lowest average reported performance rates in this sample?
+2. How much does reported performance vary within each measure?
+3. Which providers have the highest and lowest average rates across their available measures?
+4. What missingness, invalid values, or duplicate records could affect interpretation?
+5. What additional data would be required for fairer provider comparisons?
+
+## Success criteria
+
+- Document the dataset, fields, and limitations.
+- Quantify missing values and duplicate records.
+- Produce measure-level descriptive statistics.
+- Create at least four readable visualizations.
+- Make recommendations that are traceable to actual calculated results.
+- Avoid unsupported claims about care quality or causal relationships.
+
+# 2. Prepare: Data Source and Understanding
+
+**Official source:** [CMS Hospice - Provider Data](https://data.cms.gov/provider-data/dataset/252m-zfp9)
+
+The CMS dataset lists hospice providers and reported quality-of-care measures. The original provider dataset contains fields such as CMS Certification Number (CCN), provider name, location, measure code, measure name, score, footnote, and measure date range.
+
+This report starts with the smaller R sample so the analysis is easy to reproduce without manually downloading a file.
+
+## Sample fields
+
+| Field | Meaning | Use |
+|---|---|---|
+| `org_pac_id` | Provider organization identifier | Identify an organization |
+| `org_nm` | Organization name | Label results |
+| `measure_cd` | Measure code | Group like measures |
+| `measure_title` | Measure title | Explain the measure |
+| `prf_rate` | Reported performance rate | Descriptive analysis |
+
+**Interpretation warning:** The sample does not contain state, reporting period, denominator, or other case-mix/context fields. It cannot support state comparisons, denominator-weighted estimates, or definitive current provider rankings. A high score is not automatically proof of better overall hospice care; measure definitions and reporting context matter.
+
+# 3. Setup and Packages
+
+Run package installation once in the RStudio Console if needed:
+
+```{r}
+#| eval: false
+install.packages(c("tidyverse", "tidyr", "janitor", "scales", "knitr", "DT"))
+```
+
+Load packages:
+
+```{r}
+library(tidyverse)
+library(tidyr)
+library(janitor)
+library(scales)
+library(knitr)
+library(DT)
+```
+
+# 4. Process: Import and Inspect
+
+```{r}
+data("cms_patient_experience", package = "tidyr")
+
+cms_raw <- cms_patient_experience
+
+glimpse(cms_raw)
+dim(cms_raw)
+head(cms_raw, 10)
+```
+
+## Standardize column names and data types
+
+```{r}
+cms_clean <- cms_raw |>
+  janitor::clean_names() |>
+  mutate(
+    org_pac_id = as.character(org_pac_id),
+    org_nm = str_squish(as.character(org_nm)),
+    measure_cd = str_squish(as.character(measure_cd)),
+    measure_title = str_squish(as.character(measure_title)),
+    prf_rate = suppressWarnings(as.numeric(prf_rate))
+  )
+
+glimpse(cms_clean)
+```
+
+## Data-quality checks
+
+### Missing values
+
+```{r}
+missing_summary <- tibble(
+  variable = names(cms_clean),
+  missing_count = vapply(cms_clean, \(x) sum(is.na(x)), integer(1)),
+  missing_percent = vapply(cms_clean, \(x) mean(is.na(x)) * 100, numeric(1))
+) |>
+  arrange(desc(missing_count))
+
+knitr::kable(missing_summary, digits = 2,
+             caption = "Missing values by variable")
+```
+
+### Exact duplicate records
+
+```{r}
+exact_duplicate_count <- sum(duplicated(cms_clean))
+exact_duplicate_count
+```
+
+### Invalid performance rates
+
+For measures expressed as percentages, rates are ordinarily expected to fall between 0 and 100. Confirm the measure's definition before applying this rule to any other score type.
+
+```{r}
+invalid_rates <- cms_clean |>
+  filter(!is.na(prf_rate), prf_rate < 0 | prf_rate > 100)
+
+invalid_rates
+```
+
+### Duplicate provider-measure combinations
+
+```{r}
+duplicate_combinations <- cms_clean |>
+  count(org_pac_id, measure_cd, name = "records") |>
+  filter(records > 1) |>
+  arrange(desc(records))
+
+duplicate_combinations
+```
+
+Repeated combinations should be investigated rather than automatically removed. They could reflect duplicates, multiple periods, or another structure not visible in the sample fields.
+
+## Create an analysis-ready table
+
+This first-pass rule removes records missing essential identifiers or rates and rates outside 0–100. Exact duplicates are removed, but repeated provider-measure combinations are flagged separately for review.
+
+```{r}
+cms_analysis <- cms_clean |>
+  filter(
+    !is.na(org_pac_id), org_pac_id != "",
+    !is.na(org_nm), org_nm != "",
+    !is.na(measure_cd), measure_cd != "",
+    !is.na(prf_rate),
+    between(prf_rate, 0, 100)
+  ) |>
+  distinct()
+
+cleaning_summary <- tibble(
+  stage = c("Original sample", "Analysis-ready sample"),
+  rows = c(nrow(cms_raw), nrow(cms_analysis))
+) |>
+  mutate(rows_removed_vs_original = nrow(cms_raw) - rows)
+
+knitr::kable(cleaning_summary,
+             caption = "Record counts before and after first-pass cleaning")
+```
+
+# 5. Analyze: Descriptive Statistics
+
+## Overall sample summary
+
+These are descriptive summaries of the available measure rates. They are not a single validated score of overall hospice quality.
+
+```{r}
+overall_summary <- cms_analysis |>
+  summarise(
+    records = n(),
+    providers = n_distinct(org_pac_id),
+    measures = n_distinct(measure_cd),
+    mean_rate = mean(prf_rate),
+    median_rate = median(prf_rate),
+    sd_rate = sd(prf_rate),
+    min_rate = min(prf_rate),
+    max_rate = max(prf_rate)
+  )
+
+knitr::kable(overall_summary, digits = 2,
+             caption = "Overall summary of available reported rates")
+```
+
+## Performance by measure
+
+```{r}
+measure_summary <- cms_analysis |>
+  group_by(measure_cd, measure_title) |>
+  summarise(
+    records = n(),
+    providers = n_distinct(org_pac_id),
+    mean_rate = mean(prf_rate),
+    median_rate = median(prf_rate),
+    sd_rate = sd(prf_rate),
+    min_rate = min(prf_rate),
+    max_rate = max(prf_rate),
+    .groups = "drop"
+  ) |>
+  arrange(desc(mean_rate))
+
+knitr::kable(measure_summary, digits = 2,
+             caption = "Reported performance summary by measure")
+```
+
+Measure comparisons are more interpretable than combining all measure rates into one score because measures can represent different aspects of care.
+
+## Provider-level summary
+
+The following average is a simple mean of each provider's available sample measure rates. It does **not** adjust for denominators, reporting period, patient mix, or measure importance, and should not be described as an official CMS composite rating.
+
+```{r}
+provider_summary <- cms_analysis |>
+  group_by(org_pac_id, org_nm) |>
+  summarise(
+    measures_available = n_distinct(measure_cd),
+    average_available_rate = mean(prf_rate),
+    median_available_rate = median(prf_rate),
+    lowest_available_rate = min(prf_rate),
+    highest_available_rate = max(prf_rate),
+    .groups = "drop"
+  ) |>
+  arrange(desc(average_available_rate))
+
+knitr::kable(head(provider_summary, 15), digits = 2,
+             caption = "First 15 providers by simple average of available sample rates")
+```
+
+Only compare providers with similar measure coverage. A provider with fewer reported measures may not be comparable to one with more complete data.
+
+# 6. Visualize: Charts
+
+## Chart 1: Average performance rate by measure
+
+```{r}
+measure_plot_data <- measure_summary |>
+  filter(!is.na(mean_rate)) |>
+  mutate(measure_label = str_trunc(measure_title, 65)) |>
+  arrange(mean_rate)
+
+ggplot(measure_plot_data,
+       aes(x = reorder(measure_label, mean_rate), y = mean_rate)) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 100), labels = label_number(suffix = "%")) +
+  labs(
+    title = "Average reported rate by quality measure",
+    subtitle = "Sample-level descriptive comparison; not an official composite rating",
+    x = NULL, y = "Mean reported rate"
+  ) +
+  theme_minimal()
+```
+
+**How to interpret:** Compare measures with one another cautiously. Different measure definitions and eligibility rules mean the highest average is not necessarily the most important measure.
+
+## Chart 2: Distribution of reported rates by measure
+
+```{r}
+distribution_data <- cms_analysis |>
+  left_join(
+    measure_summary |> select(measure_cd, measure_title),
+    by = "measure_cd",
+    suffix = c("", "_summary")
+  ) |>
+  mutate(measure_label = str_trunc(measure_title, 50))
+
+ggplot(distribution_data,
+       aes(x = reorder(measure_label, prf_rate, FUN = median),
+           y = prf_rate)) +
+  geom_boxplot(na.rm = TRUE) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 100), labels = label_number(suffix = "%")) +
+  labs(
+    title = "Variation in reported rates across providers",
+    x = NULL, y = "Reported performance rate"
+  ) +
+  theme_minimal()
+```
+
+**How to interpret:** Wider boxes or longer whiskers indicate more variation in the sample. Investigate sample size and measure definitions before treating variation as a meaningful performance gap.
+
+## Chart 3: Distribution of all available rates
+
+```{r}
+ggplot(cms_analysis, aes(x = prf_rate)) +
+  geom_histogram(binwidth = 5, boundary = 0, na.rm = TRUE) +
+  scale_x_continuous(breaks = seq(0, 100, 10),
+                     labels = label_number(suffix = "%")) +
+  labs(
+    title = "Distribution of reported hospice quality rates",
+    x = "Reported performance rate", y = "Number of records"
+  ) +
+  theme_minimal()
+```
+
+**How to interpret:** This chart shows how the recorded rates are distributed. It is record-weighted, so measures or providers with more observations can contribute more rows.
+
+## Chart 4: Provider comparison for the most frequently represented measure
+
+```{r}
+most_common_measure <- cms_analysis |>
+  count(measure_cd, measure_title, sort = TRUE) |>
+  slice_head(n = 1)
+
+top_measure_providers <- cms_analysis |>
+  semi_join(most_common_measure, by = c("measure_cd", "measure_title")) |>
+  group_by(org_pac_id, org_nm) |>
+  summarise(rate = mean(prf_rate), .groups = "drop") |>
+  slice_max(rate, n = 10, with_ties = FALSE) |>
+  arrange(rate) |>
+  mutate(provider_label = str_trunc(org_nm, 45))
+
+ggplot(top_measure_providers,
+       aes(x = reorder(provider_label, rate), y = rate)) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 100), labels = label_number(suffix = "%")) +
+  labs(
+    title = "Ten highest rates for the most represented sample measure",
+    subtitle = paste("Measure:", most_common_measure$measure_title[1]),
+    x = NULL, y = "Reported performance rate"
+  ) +
+  theme_minimal()
+```
+
+This is a descriptive illustration, not a national provider ranking. The result depends on the measure coverage in the bundled sample.
+
+# 7. Optional Interactive Data Table
+
+```{r}
+DT::datatable(
+  measure_summary,
+  rownames = FALSE,
+  filter = "top",
+  options = list(pageLength = 10, scrollX = TRUE),
+  caption = "Filterable quality measure summary"
+)
+```
+
+# 8. Findings: Generate Evidence, Not Assumptions
+
+The code above calculates the results from the installed `tidyr` sample when the report is rendered. Use the output tables and charts to write the final findings.
+
+Complete this checklist after rendering:
+
+- [ ] Report the original and cleaned record counts.
+- [ ] State the number of distinct providers and measures in the cleaned sample.
+- [ ] Identify the measures with the highest and lowest sample mean rates.
+- [ ] Describe the amount of variation shown in the measure-level boxplots.
+- [ ] Report missing values and any invalid rates or duplicate combinations.
+- [ ] Explain how the sample's small size and missing context limit conclusions.
+
+Do not claim that a particular measure is the weakest or that a particular provider is the best until the rendered results support the statement. The analysis code intentionally avoids hard-coded findings.
+
+# 9. Act: Recommendations
+
+These recommendations are proposed actions to test, not claims that the sample proves a problem exists.
+
+1. **Validate data before reporting.** Maintain a repeatable check for missing identifiers, missing rates, out-of-range values, and repeated provider-measure-period records.
+2. **Investigate lower-performing measures.** Once the actual measure-level results are available, review the measure specifications and determine whether observed differences are meaningful and actionable.
+3. **Compare like with like.** Use the same measure, reporting period, eligibility definition, and appropriate denominator when comparing providers.
+4. **Use full CMS data for operational follow-up.** Incorporate CCN, state, measure date range, footnotes, and denominator-related information when available.
+5. **Review trends over time.** Obtain consistent historical snapshots before concluding that a provider's performance is improving or declining.
+6. **Pair scores with context.** Do not interpret a rate as a complete picture of hospice quality. Review definitions, reporting limitations, and complementary patient/family experience measures.
+
+## Suggested 30-60-90 day implementation plan
+
+| Period | Activity | Deliverable |
+|---|---|---|
+| Days 1–30 | Validate the full source data and measure definitions | Data dictionary and quality-check report |
+| Days 31–60 | Build comparable measure-level and provider-level summaries | Validated analysis tables and dashboard prototype |
+| Days 61–90 | Review findings with quality leaders and define follow-up actions | Improvement hypotheses and monitoring plan |
+
+# 10. Limitations and Responsible Interpretation
+
+- This bundled sample contains 500 observations and five variables, rather than the full CMS source.
+- It lacks location, reporting-period, denominator, and footnote information in the sample schema.
+- Reported rates can refer to different quality measures and may not be directly comparable.
+- A simple mean across measures is not an official CMS overall quality score.
+- Missing values may have specific reporting meanings and should not automatically be treated as poor performance.
+- This is an observational, descriptive analysis. It does not demonstrate that a provider characteristic causes a quality outcome.
+- Provider results should be interpreted with current CMS documentation and the applicable measure definitions.
+
+# 11. Share: Portfolio Deliverables
+
+Recommended portfolio outputs:
+
+1. This Quarto HTML report.
+2. A GitHub repository containing the `.qmd`, README, and reproducible code.
+3. A dashboard with measure-level performance, distribution, and data-quality indicators.
+4. A concise one-page executive summary with verified findings.
+5. A data dictionary and a description of the cleaning decisions.
+
+## Suggested README summary
+
+> This project analyzes the CMS `cms_patient_experience` sample in R to demonstrate a reproducible healthcare quality analytics workflow. It includes data validation, descriptive statistics, provider-measure comparisons, visualizations, limitations, and proposed quality-improvement follow-up. The bundled sample is not the full CMS dataset, and simple sample averages are not official CMS provider ratings.
+
+# 12. Reproducibility and Source
+
+- **Primary source:** [CMS Hospice - Provider Data](https://data.cms.gov/provider-data/dataset/252m-zfp9)
+- **Sample documentation:** [tidyr `cms_patient_experience` reference](https://tidyr.tidyverse.org/reference/cms_patient_experience.html)
+- **Analysis tool:** R and RStudio
+- **Report format:** Quarto HTML
+
+To render the report, save this file as `CMS_Hospice_Quality_Case_Study.qmd`, open it in RStudio, and select **Render**. If prompted to install Quarto, follow the RStudio installation instructions.
